@@ -2,8 +2,8 @@ package quik
 
 import (
 	"context"
-	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -64,7 +64,8 @@ type Pool[T any] struct {
 	inboundTasks chan func() T
 
 	// Waiting Pen Specifics
-	waitingQ chan func() T
+	waitingQ       chan func() T
+	waitingQLength int32
 
 	// Worker Queue Specifics
 	workerQ chan func() T
@@ -108,7 +109,7 @@ core:
 
 		// There is backpressure at the moment in the form of a backlog
 		// try get the tasks out of there into the worker queue directly.
-		if len(p.waitingQ) != 0 {
+		if p.WaitingQueueSize() != 0 {
 			moved := p.processWaitingTask()
 			if moved {
 				continue
@@ -121,26 +122,23 @@ core:
 		select {
 		// We can transfer from the incoming queue directly into workers.
 		case t := <-p.inboundTasks:
-			// Handle worker creation if required, otherwise we will be blocked
-			// indefinitely on the first task as the worker queue will never
-			// be accepting a task
-			if currentWorkers < p.maxworkers {
-				// we need a synchronisation event here to avoid the worker routine
-				// never getting any scheduler time.
-				workerWg.Add(1)
-				p.startWorker(&workerWg)
-				currentWorkers++
-			}
-
 			select {
 			// Try to push the task directly into the worker queue.
 			case p.workerQ <- t:
 			// WorkerQ woud be blocking, store the task in the waiting queue.
 			default:
-				// This is blocking for now, but we don't want it to be;
-				// swap out the channel FIFO queue for something more
-				// performant at both ends (insert[0], popright)
+				// Handle worker creation if required, otherwise we will be blocked
+				// indefinitely on the first task as the worker queue will never
+				// be accepting a task
+				if currentWorkers < p.maxworkers {
+					// we need a synchronisation event here to avoid the worker routine
+					// never getting any scheduler time.
+					workerWg.Add(1)
+					p.startWorker(&workerWg)
+					currentWorkers++
+				}
 				p.waitingQ <- t
+				atomic.StoreInt32(&p.waitingQLength, int32(len(p.waitingQ)))
 			}
 		case <-workerCheckTicker.C:
 			if idle {
@@ -153,8 +151,9 @@ core:
 		}
 	}
 
-	// Handle graceful shutdown, we need to flush all tasks already in the queues if graceful is
-	// enabled, aswell as close down all workers.
+	// While we have current workers, send nil tasks onto the worker queue
+	// in order to force all the workers to finally exit, zero'ing the wg
+	// for a clean exit.
 	for currentWorkers > 0 {
 		p.workerQ <- nil
 	}
@@ -170,6 +169,11 @@ func (p *Pool[T]) terminate(graceful bool) {
 
 func (p *Pool[T]) Stop(graceful bool) {
 	p.terminate(graceful)
+}
+
+// WaitingQueueSize returns the size of the holding pen.
+func (p *Pool[T]) WaitingQueueSize() int32 {
+	return atomic.LoadInt32(&p.waitingQLength)
 }
 
 // IsStopped returns a boolean indicating if the pool
@@ -198,12 +202,8 @@ func (p *Pool[T]) EnqueuePriority(task func() T) {
 func (p *Pool[T]) EnqueueWait(task func() T) {
 	closeCh := make(chan struct{})
 	wrapper := func() T {
-		defer func() {
-			fmt.Println("closing task chan")
-			close(closeCh)
-		}()
+		defer close(closeCh)
 		result := task()
-		fmt.Println("wrapped result: ", result)
 		return result
 	}
 	p.inboundTasks <- wrapper
@@ -224,6 +224,7 @@ func (p *Pool[T]) EnqueueWait(task func() T) {
 func (p *Pool[T]) processWaitingTask() bool {
 	select {
 	case p.workerQ <- <-p.waitingQ:
+		atomic.StoreInt32(&p.waitingQLength, p.waitingQLength-1)
 		return true
 	default:
 		return false
