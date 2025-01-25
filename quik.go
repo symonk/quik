@@ -2,7 +2,6 @@ package quik
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,7 +50,8 @@ type Pooler[T any] interface {
 // Placeholder: Options outline.
 type Pool[T any] struct {
 	// worker specifics
-	maxworkers          int
+	maxWorkers          int
+	currentWorkers      int
 	workerScaleInterval time.Duration
 
 	results chan T
@@ -76,7 +76,7 @@ type Pool[T any] struct {
 // configuration to it and returning the pointer to the instance.
 func New[T any](options ...Option[T]) *Pool[T] {
 	pool := &Pool[T]{
-		maxworkers:          1,
+		maxWorkers:          1,
 		workerScaleInterval: defaultWorkerCyclePeriod,
 		results:             make(chan T),
 		done:                make(chan struct{}),
@@ -98,7 +98,6 @@ func New[T any](options ...Option[T]) *Pool[T] {
 func (p *Pool[T]) run() {
 	defer close(p.done)
 
-	var currentWorkers int
 	// Keep track if we have been idle for the worker idle period of time
 	// if we have, attempt to shutdown a worker
 	workerCheckTicker := time.NewTicker(defaultWorkerCyclePeriod)
@@ -130,20 +129,19 @@ core:
 				// Handle worker creation if required, otherwise we will be blocked
 				// indefinitely on the first task as the worker queue will never
 				// be accepting a task
-				if currentWorkers < p.maxworkers {
+				if p.currentWorkers < p.maxWorkers {
 					// we need a synchronisation event here to avoid the worker routine
 					// never getting any scheduler time.
 					workerWg.Add(1)
 					p.startWorker(&workerWg)
-					currentWorkers++
+					p.currentWorkers++
 				}
 				p.waitingQ <- t
 				atomic.StoreInt32(&p.waitingQLength, int32(len(p.waitingQ)))
 			}
 		case <-workerCheckTicker.C:
-			if idle && currentWorkers != 0 {
-				p.shutdownWorker(&currentWorkers)
-				currentWorkers--
+			if idle && p.currentWorkers != 0 {
+				p.shutdownWorker()
 			}
 			workerCheckTicker.Reset(defaultWorkerCyclePeriod)
 		case <-p.closing:
@@ -154,9 +152,8 @@ core:
 	// While we have current workers, send nil tasks onto the worker queue
 	// in order to force all the workers to finally exit, zero'ing the wg
 	// for a clean exit.
-	fmt.Println("current workers: ", currentWorkers)
-	for currentWorkers > 0 {
-		p.shutdownWorker(&currentWorkers)
+	for p.currentWorkers > 0 {
+		p.shutdownWorker()
 	}
 
 	// Wait for all the workers to shutdown.
@@ -241,9 +238,9 @@ func (p *Pool[T]) processWaitingTask() bool {
 // time.
 //
 // The overhead in stopping these workers is minimal, this maximises efficiency.
-func (p *Pool[T]) shutdownWorker(currentWorkers *int) {
+func (p *Pool[T]) shutdownWorker() {
 	p.workerQ <- nil
-	*currentWorkers--
+	p.currentWorkers--
 }
 
 // startWorker spawns a new groutine with another worker.

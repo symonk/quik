@@ -10,12 +10,12 @@ import (
 func TestAppliesMaxWorkersCorrectly(t *testing.T) {
 	w := 10
 	p := New(WithWorkerLimit[any](w))
-	assert.Equal(t, p.maxworkers, w)
+	assert.Equal(t, p.maxWorkers, w)
 }
 
 func TestMaxWorkersDefaultIsOne(t *testing.T) {
 	p := New[any]()
-	assert.Equal(t, p.maxworkers, 1)
+	assert.Equal(t, p.maxWorkers, 1)
 }
 
 func TestCanOverwriteWorkerIdleDuration(t *testing.T) {

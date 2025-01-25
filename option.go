@@ -8,7 +8,7 @@ type Option[T any] func(p *Pool[T])
 // Limit the upper bounded number of goroutines allowed to run
 func WithWorkerLimit[T any](maxworkers int) Option[T] {
 	return func(p *Pool[T]) {
-		p.maxworkers = maxworkers
+		p.maxWorkers = maxworkers
 	}
 }
 
