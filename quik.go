@@ -224,13 +224,16 @@ func (p *Pool[T]) EnqueueWait(task func() T) {
 // of the holding pen is not empty.
 func (p *Pool[T]) processWaitingTask() bool {
 	select {
-	case t := <-p.waitingQ:
-		p.workerQ <- t
-		atomic.StoreInt32(&p.waitingQLength, p.waitingQLength-1)
+	case t, ok := <-p.inboundTasks:
+		if !ok {
+			return false
+		}
+		p.waitingQ <- t
+	case p.workerQ <- <-p.waitingQ:
 		return true
-	default:
-		return false
 	}
+	atomic.StoreInt32(&p.waitingQLength, p.waitingQLength-1)
+	return true
 }
 
 // shutdownWorker sends a nil task to a worker which would cause them to exit.
