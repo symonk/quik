@@ -132,9 +132,7 @@ core:
 				if p.currentWorkers < p.maxWorkers {
 					// we need a synchronisation event here to avoid the worker routine
 					// never getting any scheduler time.
-					workerWg.Add(1)
-					p.startWorker(&workerWg)
-					p.currentWorkers++
+					p.startWorker(t, &workerWg)
 				}
 				p.waitingQ <- t
 				atomic.StoreInt32(&p.waitingQLength, int32(len(p.waitingQ)))
@@ -152,6 +150,7 @@ core:
 	// While we have current workers, send nil tasks onto the worker queue
 	// in order to force all the workers to finally exit, zero'ing the wg
 	// for a clean exit.
+	// TODO: What if we have tasks to drain down?
 	for p.currentWorkers > 0 {
 		p.shutdownWorker()
 	}
@@ -226,7 +225,8 @@ func (p *Pool[T]) processWaitingTask() bool {
 			return false
 		}
 		p.waitingQ <- t
-	case p.workerQ <- <-p.waitingQ:
+	case t := <-p.waitingQ:
+		p.workerQ <- t
 		return true
 	}
 	atomic.StoreInt32(&p.waitingQLength, p.waitingQLength-1)
@@ -249,19 +249,21 @@ func (p *Pool[T]) shutdownWorker() {
 //
 // currworkers is evaluated in the core loop and not here
 // to avoid the need for excessive locking.
-func (p *Pool[T]) startWorker(wg *sync.WaitGroup) {
-	go worker(p.workerQ, wg)
+func (p *Pool[T]) startWorker(initialTask func() T, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		worker(initialTask, p.workerQ, wg)
+	}()
+	p.currentWorkers++
 }
 
 // worker is ran in a goroutine upto pool.maxworker times.
 // if a nil task is received by the worker, it is considered
 // a signal to shutdown.
-func worker[T any](workerTaskQueue <-chan func() T, wg *sync.WaitGroup) {
+func worker[T any](t func() T, workerTaskQueue <-chan func() T, wg *sync.WaitGroup) {
 	defer wg.Done()
-	for t := range workerTaskQueue {
-		if t == nil {
-			return
-		}
+	for t != nil {
 		t()
+		t = <-workerTaskQueue
 	}
 }
