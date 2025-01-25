@@ -101,13 +101,15 @@ func (p *Pool[T]) run() {
 	// if we have, attempt to shutdown a worker
 	workerCheckTicker := time.NewTicker(defaultWorkerCyclePeriod)
 	idle := false
+
+	var workerWg sync.WaitGroup
 core:
 	for {
 
 		// There is backpressure at the moment in the form of a backlog
 		// try get the tasks out of there into the worker queue directly.
 		if len(p.waitingQ) != 0 {
-			moved := p.processWaitingQueue()
+			moved := p.processWaitingTask()
 			if moved {
 				continue
 			}
@@ -119,26 +121,22 @@ core:
 		select {
 		// We can transfer from the incoming queue directly into workers.
 		case t := <-p.inboundTasks:
-			idle = false
-
 			// Handle worker creation if required, otherwise we will be blocked
 			// indefinitely on the first task as the worker queue will never
 			// be accepting a task
 			if currentWorkers < p.maxworkers {
 				// we need a synchronisation event here to avoid the worker routine
 				// never getting any scheduler time.
-				p.startWorker()
+				workerWg.Add(1)
+				p.startWorker(&workerWg)
 				currentWorkers++
 			}
 
 			select {
-			// TODO: This will do the write before we've launched a worker
+			// Try to push the task directly into the worker queue.
 			case p.workerQ <- t:
+			// WorkerQ woud be blocking, store the task in the waiting queue.
 			default:
-				// TODO: This worker routine is completely starved right now - probably
-				// by the busy loop on select default!
-				// Remove the sleep later and fix.
-				time.Sleep(time.Second)
 				// This is blocking for now, but we don't want it to be;
 				// swap out the channel FIFO queue for something more
 				// performant at both ends (insert[0], popright)
@@ -147,12 +145,22 @@ core:
 		case <-workerCheckTicker.C:
 			if idle {
 				p.shutdownWorker()
+				currentWorkers--
 			}
 			workerCheckTicker.Reset(defaultWorkerCyclePeriod)
 		case <-p.closing:
 			break core
 		}
 	}
+
+	// Handle graceful shutdown, we need to flush all tasks already in the queues if graceful is
+	// enabled, aswell as close down all workers.
+	for currentWorkers > 0 {
+		p.workerQ <- nil
+	}
+
+	// Wait for all the workers to shutdown.
+	workerWg.Wait()
 }
 
 func (p *Pool[T]) terminate(graceful bool) {
@@ -202,7 +210,7 @@ func (p *Pool[T]) EnqueueWait(task func() T) {
 	<-closeCh
 }
 
-// processWaitingQueue attempts to pick tasks from the holding pen and
+// processWaitingTask attempts to pick tasks from the holding pen and
 // moves them towards the worker queue.  If we have a backlog of
 // pending tasks we should prioritise taking from here instead.
 //
@@ -213,7 +221,7 @@ func (p *Pool[T]) EnqueueWait(task func() T) {
 // This will avoid spinning the CPU, it will attempt to move a single
 // task, the core run loop will continue to try as long as the length
 // of the holding pen is not empty.
-func (p *Pool[T]) processWaitingQueue() bool {
+func (p *Pool[T]) processWaitingTask() bool {
 	select {
 	case p.workerQ <- <-p.waitingQ:
 		return true
@@ -237,22 +245,19 @@ func (p *Pool[T]) shutdownWorker() {
 //
 // currworkers is evaluated in the core loop and not here
 // to avoid the need for excessive locking.
-func (p *Pool[T]) startWorker() {
-	go worker(p.workerQ)
+func (p *Pool[T]) startWorker(wg *sync.WaitGroup) {
+	go worker(p.workerQ, wg)
 }
 
 // worker is ran in a goroutine upto pool.maxworker times.
 // if a nil task is received by the worker, it is considered
 // a signal to shutdown.
-func worker[T any](workerTaskQueue <-chan func() T) {
-	fmt.Println("started worker!")
+func worker[T any](workerTaskQueue <-chan func() T, wg *sync.WaitGroup) {
+	defer wg.Done()
 	for t := range workerTaskQueue {
-		fmt.Println("got task!")
 		if t == nil {
-			fmt.Println("shutting down worker")
 			return
 		}
-		r := t()
-		fmt.Println("result was: ", r)
+		t()
 	}
 }
