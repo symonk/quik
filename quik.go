@@ -2,6 +2,7 @@ package quik
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -106,12 +107,11 @@ func (p *Pool[T]) run() {
 	var workerWg sync.WaitGroup
 core:
 	for {
-
 		// There is backpressure at the moment in the form of a backlog
 		// try get the tasks out of there into the worker queue directly.
 		if p.WaitingQueueSize() != 0 {
-			moved := p.processWaitingTask()
-			if moved {
+			ok := p.processWaitingTask()
+			if ok {
 				continue
 			}
 		}
@@ -141,8 +141,8 @@ core:
 				atomic.StoreInt32(&p.waitingQLength, int32(len(p.waitingQ)))
 			}
 		case <-workerCheckTicker.C:
-			if idle {
-				p.shutdownWorker()
+			if idle && currentWorkers != 0 {
+				p.shutdownWorker(&currentWorkers)
 				currentWorkers--
 			}
 			workerCheckTicker.Reset(defaultWorkerCyclePeriod)
@@ -154,8 +154,9 @@ core:
 	// While we have current workers, send nil tasks onto the worker queue
 	// in order to force all the workers to finally exit, zero'ing the wg
 	// for a clean exit.
+	fmt.Println("current workers: ", currentWorkers)
 	for currentWorkers > 0 {
-		p.workerQ <- nil
+		p.shutdownWorker(&currentWorkers)
 	}
 
 	// Wait for all the workers to shutdown.
@@ -223,7 +224,8 @@ func (p *Pool[T]) EnqueueWait(task func() T) {
 // of the holding pen is not empty.
 func (p *Pool[T]) processWaitingTask() bool {
 	select {
-	case p.workerQ <- <-p.waitingQ:
+	case t := <-p.waitingQ:
+		p.workerQ <- t
 		atomic.StoreInt32(&p.waitingQLength, p.waitingQLength-1)
 		return true
 	default:
@@ -236,8 +238,9 @@ func (p *Pool[T]) processWaitingTask() bool {
 // time.
 //
 // The overhead in stopping these workers is minimal, this maximises efficiency.
-func (p *Pool[T]) shutdownWorker() {
+func (p *Pool[T]) shutdownWorker(currentWorkers *int) {
 	p.workerQ <- nil
+	*currentWorkers--
 }
 
 // startWorker spawns a new groutine with another worker.
