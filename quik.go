@@ -133,8 +133,9 @@ core:
 					// we need a synchronisation event here to avoid the worker routine
 					// never getting any scheduler time.
 					p.startWorker(t, &workerWg)
+				} else {
+					p.waitingQ <- t
 				}
-				p.waitingQ <- t
 				atomic.StoreInt32(&p.waitingQLength, int32(len(p.waitingQ)))
 			}
 		case <-workerCheckTicker.C:
