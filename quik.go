@@ -56,7 +56,6 @@ type Pool[T any] struct {
 
 	results chan T
 	done    chan struct{}
-	closing chan struct{}
 
 	stopped    bool
 	stoppedMu  sync.Mutex
@@ -83,7 +82,6 @@ func New[T any](options ...Option[T]) *Pool[T] {
 		results:             make(chan T),
 		done:                make(chan struct{}),
 		inboundTasks:        make(chan func() T),
-		closing:             make(chan struct{}),
 		// TODO: Change underling data structure here, this can still block
 		// when producer is faster than consumers.
 		waitingQ:   make(chan func() T, 1024),
@@ -150,8 +148,6 @@ core:
 				p.shutdownWorker()
 			}
 			workerCheckTicker.Reset(defaultWorkerCyclePeriod)
-		case <-p.closing:
-			break core
 		}
 	}
 
@@ -181,7 +177,6 @@ core:
 // tasks in transient/flight will be lost and have no
 // guarantee of completion.
 func (p *Pool[T]) terminate(graceful bool) {
-	close(p.closing)
 	p.once.Do(func() {
 		p.stoppedMu.Lock()
 		p.stopped = true
@@ -192,6 +187,7 @@ func (p *Pool[T]) terminate(graceful bool) {
 	<-p.done
 }
 
+// Stop terminates the pool.
 func (p *Pool[T]) Stop(graceful bool) {
 	p.terminate(graceful)
 }
@@ -200,6 +196,17 @@ func (p *Pool[T]) Stop(graceful bool) {
 // requested.  This blocks the incoming queues and is blocking until
 // all tasks currently in the queue systems internally are cleared down.
 func (p *Pool[T]) Drain() {
+
+}
+
+// Quiesce causes the pool to pause internally until a particular context
+// has been timed out.  This is useful for reacting to cases such as
+// database issues where writes would be failing.
+//
+// All workers will be blocked.  For now it queues tasks to cause a block
+// but in future this will utilise a priority system to guarantee instant
+// blockage across all workers.
+func (p *Pool[T]) Quiesce(context context.Context) {
 
 }
 
@@ -261,10 +268,10 @@ func (p *Pool[T]) processWaitingTask() bool {
 		}
 		p.waitingQ <- t
 	case t := <-p.waitingQ:
+		atomic.StoreInt32(&p.waitingQLength, p.waitingQLength-1)
 		p.workerQ <- t
 		return true
 	}
-	atomic.StoreInt32(&p.waitingQLength, p.waitingQLength-1)
 	return true
 }
 
