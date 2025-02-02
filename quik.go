@@ -212,6 +212,7 @@ func (p *Pool[T]) Quiesce(context context.Context) {
 	// TODO: Mutex required
 	var wg sync.WaitGroup
 	for range p.currentWorkers {
+		wg.Add(1)
 		p.workerQ <- func() T {
 			wg.Done()
 			var t T
