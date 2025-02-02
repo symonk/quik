@@ -58,8 +58,10 @@ type Pool[T any] struct {
 	done    chan struct{}
 	closing chan struct{}
 
-	stopped   bool
-	stoppedMu sync.Mutex
+	stopped    bool
+	stoppedMu  sync.Mutex
+	once       *sync.Once
+	stopSignal chan bool
 
 	// Incoming Task Queue Specifics
 	inboundTasks chan func() T
@@ -84,8 +86,9 @@ func New[T any](options ...Option[T]) *Pool[T] {
 		closing:             make(chan struct{}),
 		// TODO: Change underling data structure here, this can still block
 		// when producer is faster than consumers.
-		waitingQ: make(chan func() T, 1024),
-		workerQ:  make(chan func() T),
+		waitingQ:   make(chan func() T, 1024),
+		workerQ:    make(chan func() T),
+		stopSignal: make(chan bool, 1),
 	}
 
 	for _, optFn := range options {
@@ -120,7 +123,11 @@ core:
 		// If the worker queue is blocking, move them into the holding pen.
 		select {
 		// We can transfer from the incoming queue directly into workers.
-		case t := <-p.inboundTasks:
+		case t, ok := <-p.inboundTasks:
+			if !ok {
+				// Stop() has been invoked.
+				break core
+			}
 			select {
 			// Try to push the task directly into the worker queue.
 			case p.workerQ <- t:
@@ -148,6 +155,11 @@ core:
 		}
 	}
 
+	graceful := <-p.stopSignal
+	if graceful {
+		p.Drain()
+	}
+
 	// While we have current workers, send nil tasks onto the worker queue
 	// in order to force all the workers to finally exit, zero'ing the wg
 	// for a clean exit.
@@ -160,13 +172,35 @@ core:
 	workerWg.Wait()
 }
 
+// terminate signals run() to terminate (optionally)
+// gracefully.  If graceful is true all internal queues
+// are flushed and the call will be blocking until
+// the pool has finalized cleanly.
+//
+// If graceful is false, the pool will exit faster but
+// tasks in transient/flight will be lost and have no
+// guarantee of completion.
 func (p *Pool[T]) terminate(graceful bool) {
 	close(p.closing)
-	<-p.done // wait until run() has fully terminated.
+	p.once.Do(func() {
+		p.stoppedMu.Lock()
+		p.stopped = true
+		p.stoppedMu.Unlock()
+		p.stopSignal <- graceful
+		close(p.inboundTasks)
+	})
+	<-p.done
 }
 
 func (p *Pool[T]) Stop(graceful bool) {
 	p.terminate(graceful)
+}
+
+// Drain is invoked when Stop() is called if a graceful termination is
+// requested.  This blocks the incoming queues and is blocking until
+// all tasks currently in the queue systems internally are cleared down.
+func (p *Pool[T]) Drain() {
+
 }
 
 // WaitingQueueSize returns the size of the holding pen.
@@ -174,9 +208,9 @@ func (p *Pool[T]) WaitingQueueSize() int32 {
 	return atomic.LoadInt32(&p.waitingQLength)
 }
 
-// IsStopped returns a boolean indicating if the pool
+// Stopped returns a boolean indicating if the pool
 // has been successfully stopped.
-func (p *Pool[T]) IsStopped() bool {
+func (p *Pool[T]) Stopped() bool {
 	p.stoppedMu.Lock()
 	defer p.stoppedMu.Unlock()
 	return p.stopped
