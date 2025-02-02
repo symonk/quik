@@ -239,14 +239,15 @@ func (p *Pool[T]) EnqueuePriority(task func() T) {
 // This internally wraps the task function in an internal function
 // and waits until it has been exited.
 func (p *Pool[T]) EnqueueWait(task func() T) {
-	closeCh := make(chan struct{})
-	wrapper := func() T {
-		defer close(closeCh)
-		result := task()
-		return result
+	if task != nil {
+		closer := make(chan struct{})
+		blockingTask := func() T {
+			defer close(closer)
+			return task()
+		}
+		p.inboundTasks <- blockingTask
+		<-closer
 	}
-	p.inboundTasks <- wrapper
-	<-closeCh
 }
 
 // processWaitingTask attempts to pick tasks from the holding pen and
