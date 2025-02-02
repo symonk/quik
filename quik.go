@@ -199,7 +199,6 @@ func (p *Pool[T]) Stop(graceful bool) {
 // requested.  This blocks the incoming queues and is blocking until
 // all tasks currently in the queue systems internally are cleared down.
 func (p *Pool[T]) Drain() {
-
 }
 
 // Quiesce causes the pool to pause internally until a particular context
@@ -210,7 +209,18 @@ func (p *Pool[T]) Drain() {
 // but in future this will utilise a priority system to guarantee instant
 // blockage across all workers.
 func (p *Pool[T]) Quiesce(context context.Context) {
-
+	// TODO: Mutex required
+	var wg sync.WaitGroup
+	for range p.currentWorkers {
+		p.workerQ <- func() T {
+			wg.Done()
+			var t T
+			<-context.Done()
+			return t
+		}
+	}
+	// Wait until all functions are running.
+	wg.Wait()
 }
 
 // WaitingQueueSize returns the size of the holding pen.
