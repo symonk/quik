@@ -76,6 +76,8 @@ type Pool[T any] struct {
 // New instantiates a new pool instance, applying the options
 // configuration to it and returning the pointer to the instance.
 func New[T any](options ...Option[T]) *Pool[T] {
+	var once sync.Once
+
 	pool := &Pool[T]{
 		maxWorkers:          1,
 		workerScaleInterval: defaultWorkerCyclePeriod,
@@ -87,6 +89,7 @@ func New[T any](options ...Option[T]) *Pool[T] {
 		waitingQ:   make(chan func() T, 1024),
 		workerQ:    make(chan func() T),
 		stopSignal: make(chan bool, 1),
+		once:       &once,
 	}
 
 	for _, optFn := range options {
